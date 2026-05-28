@@ -11,18 +11,32 @@ import numpy as np
 from PIL import Image
 
 # ---- UI 干扰词 ----
-UI_STOP_PATTERNS = [
-    r'^(搜索|设置|清空|翻译|微信|文件|编辑|发送|复制|粘贴|剪切|删除|撤销)$',
-    r'^(开始|停止|暂停|恢复|帮助|关于|退出|关闭|保存|取消|确定|返回)$',
-    r'^(登录|注册|首页|消息|通讯录|发现|朋友圈|视频号|小程序)$',
-    r'^(扫一扫|看一看|搜一搜|直播|订阅号|服务号)$',
-    r'^(当前状态|当前模式|回复语言|客户原文|中文翻译|运行日志)$',
-    r'^(框选区域|全屏翻译|备用|弹窗|日志|回复|输入|输出|状态信息)$',
-    r'^(File|Edit|View|Help|Settings|Options|Tools|Window)$',
-    r'^(Close|Save|Cancel|OK|Back|Next|Send|Copy|Paste)$',
-    r'^(Cut|Delete|Undo|Redo|Minimize|Maximize|Restore)$',
+APP_SELF_WORDS = {
+    "外贸屏幕实时翻译助手", "当前状态", "当前模式", "全屏翻译",
+    "翻译回复", "复制回复", "设置", "清空", "暂停", "恢复",
+    "运行日志", "中文回复", "外语回复", "客户原文", "中文翻译",
+    "框选区域", "回复语言", "状态信息", "翻译当前屏幕",
+}
+
+CODE_NOISE_PATTERNS = [
+    r'https?://', r'127\.0\.0\.1', r'localhost', r'/api/',
+    r'\bcurl\b', r'\bPOST\b', r'\bGET\b', r'\bPUT\b', r'\bDELETE\b',
+    r'application/json', r'Content-Type',
+    r'\.py\b', r'\.js\b', r'\.json\b', r'\.txt\b', r'\.bat\b', r'\.exe\b',
+    r'\btraceback\b', r'\berror\b', r'\bwarning\b',
+    r'\bGitHub\b', r'\bcommit\b', r'\bbranch\b', r'\bmerge\b',
+    r'config_service', r'def ', r'import ', r'from ',
 ]
-_stop_re = re.compile('|'.join(UI_STOP_PATTERNS))
+_code_noise_re = re.compile('|'.join(CODE_NOISE_PATTERNS), re.IGNORECASE)
+
+NATURAL_SIGNAL = re.compile(
+    r'\b(kulambo|lamok|proteksyon|magaan|gamitin|produkto|presyo|'
+    r'magkano|order|piraso|kulay|laki|salamat|kailangan|gusto|'
+    r'padala|bayad|kumusta|po|opo|hindi|'
+    r'price|quantity|product|shipping|payment|color|size|sample|'
+    r'delivery|quotation|invoice|available|please|thank|hello|dear|'
+    r'factory|supplier|manufacturer|quality|material|package|ship)\b',
+    re.IGNORECASE)
 
 FILIPINO_WORDS = {
     "ako", "ikaw", "kita", "mahal", "kumusta", "magkano", "po", "opo",
@@ -90,37 +104,54 @@ def _is_time_or_date(text: str) -> bool:
     return False
 
 
-def is_likely_foreign_text(text: str) -> bool:
+def should_translate_text(text: str) -> bool:
+    """严格过滤：只有自然语言聊天内容才翻译"""
     t = text.strip()
+
+    # 太短的不翻译
     if len(t) < 5:
         return False
+
+    # 纯数字/符号不翻译
     if _is_mostly_number(t):
         return False
     if _is_mostly_symbol(t):
         return False
+
+    # 中文为主的不翻译
     if _chinese_ratio(t) > 0.3:
         return False
-    if _is_url_or_email(t):
-        return False
+
+    # 时间/日期不翻译
     if _is_time_or_date(t):
         return False
-    if _stop_re.match(t):
+
+    # 代码/URL/命令/接口/路径不翻译
+    if _code_noise_re.search(t):
         return False
-    if not _has_latin(t):
+
+    # 软件自身 UI 文字
+    if t in APP_SELF_WORDS:
         return False
+
+    # 纯大写短文本不翻译
     if len(t) <= 6 and t.isupper():
         return False
 
-    words = set(t.lower().split())
-    if words & FILIPINO_WORDS:
-        return True
-    if words & ENGLISH_WORDS:
+    # 必须包含拉丁字母
+    if not _has_latin(t):
+        return False
+
+    # 优先：包含自然语言信号词
+    if NATURAL_SIGNAL.search(t):
         return True
 
+    # 拉丁占比高且长度合理
     alpha = sum(1 for c in t if c.isalpha())
     total = len(re.sub(r'\s', '', t))
-    if total > 0 and alpha / total > 0.5 and 5 <= len(t) <= 300:
+    if total > 0 and alpha / total > 0.5 and 10 <= len(t) <= 300:
         return True
+
     return False
 
 
@@ -211,7 +242,7 @@ class OcrService:
                 text = text.strip()
                 if not text or conf < threshold:
                     continue
-                if not is_likely_foreign_text(text):
+                if not should_translate_text(text):
                     continue
                 if factor != 1.0:
                     bbox = [[p[0] / factor, p[1] / factor] for p in bbox]

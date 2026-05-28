@@ -111,9 +111,10 @@ class TranslateWorker(QThread):
 # ====== 全屏监听 ======
 
 class FullScreenMonitor(QThread):
-    result_ready = Signal(str, str)  # (merged_text, translated_text)
+    result_ready = Signal(str)  # translated_text only
     status_signal = Signal(str)
     timing_signal = Signal(str)
+    no_text_signal = Signal()
 
     def __init__(self, ocr: OcrService, translator: TranslatorService,
                  config: ConfigService) -> None:
@@ -122,8 +123,8 @@ class FullScreenMonitor(QThread):
         self._t = translator
         self._cfg = config
         self._running = False
-        self._cache: dict[str, float] = {}  # hash -> timestamp
-        self._busy = False  # 防止重叠轮次
+        self._cache: dict[str, float] = {}
+        self._busy = False
 
     def stop(self) -> None:
         self._running = False
@@ -134,14 +135,12 @@ class FullScreenMonitor(QThread):
     def run(self) -> None:
         self._running = True
         interval = float(self._cfg.get("ocr_interval_seconds", 2.5))
-        max_blocks = int(self._cfg.get("max_translate_blocks_per_round", 3))
         cache_min = int(self._cfg.get("translation_cache_minutes", 10))
 
         while self._running:
             if self._busy:
                 time.sleep(0.2)
                 continue
-
             self._busy = True
             r0 = time.time()
             try:
@@ -154,55 +153,48 @@ class FullScreenMonitor(QThread):
                 t0 = time.time()
                 blocks = self._ocr.recognize_blocks(img)
                 t_ocr = int((time.time() - t0) * 1000)
-
                 total_blocks = len(blocks)
 
-                # 去重
+                # 去重 + 取最长的一条
                 now = time.time()
-                new_blocks: list[OcrBlock] = []
+                best: OcrBlock | None = None
                 for b in blocks:
                     h = normalize_text(b.text)
                     if h in self._cache:
                         if now - self._cache[h] < cache_min * 60:
                             continue
                     self._cache[h] = now
-                    new_blocks.append(b)
+                    if best is None or len(b.text) > len(best.text):
+                        best = b
 
-                # 限制数量，优先长文本
-                new_blocks.sort(key=lambda b: -len(b.text))
-                new_blocks = new_blocks[:max_blocks]
-
-                # 清理过期缓存
-                stale = [h for h, ts in self._cache.items()
-                         if now - ts > cache_min * 60 * 2]
-                for h in stale:
-                    del self._cache[h]
+                # 清理过期
                 if len(self._cache) > 500:
-                    old = sorted(self._cache.items(), key=lambda x: x[1])[:200]
-                    for h, _ in old:
+                    stale = [h for h, ts in self._cache.items()
+                             if now - ts > cache_min * 60 * 2]
+                    for h in stale:
                         del self._cache[h]
 
-                if new_blocks:
+                if best:
                     self.status_signal.emit("翻译中")
-                    merged_text = "\n---\n".join(b.text for b in new_blocks)
                     t0 = time.time()
                     try:
-                        translated = self._t.translate_inbound(merged_text)
+                        translated = self._t.translate_inbound(best.text)
                     except Exception:
                         translated = ""
                     t_trans = int((time.time() - t0) * 1000)
 
-                    if translated:
-                        self.result_ready.emit(merged_text, translated)
+                    if translated and translated.strip():
+                        self.result_ready.emit(translated.strip())
+                    else:
+                        self.no_text_signal.emit()
+
                     self.timing_signal.emit(
                         f"截图:{t_cap}ms OCR:{t_ocr}ms "
-                        f"识别:{total_blocks}块 过滤后:{len(new_blocks)} "
-                        f"翻译:{(t_trans)}ms 总计:{int((time.time()-r0)*1000)}ms")
+                        f"识别:{total_blocks}块 翻译:1条 {t_trans}ms "
+                        f"总计:{int((time.time()-r0)*1000)}ms")
                 else:
                     self.timing_signal.emit(
-                        f"截图:{t_cap}ms OCR:{t_ocr}ms "
-                        f"识别:{total_blocks}块 过滤后:0")
-
+                        f"截图:{t_cap}ms OCR:{t_ocr}ms 识别:{total_blocks}块 过滤后:0")
             except Exception as e:
                 self.status_signal.emit(f"异常: {e}")
             finally:
@@ -426,7 +418,6 @@ class MainWindow(QMainWindow):
             max_n = int(self._cfg.get("max_translate_blocks_per_round", 3))
             blocks = blocks[:max_n]
             merged = "\n---\n".join(b.text for b in blocks)
-            self._source_text.setPlainText(merged)
             self._start_worker(merged, "inbound", {
                 "x": blocks[0].top_left[0], "y": blocks[0].top_left[1]})
         except Exception as e:
@@ -484,6 +475,7 @@ class MainWindow(QMainWindow):
             return
         self._monitor = FullScreenMonitor(self._ocr, self._translator, self._cfg)
         self._monitor.result_ready.connect(self._on_monitor_result)
+        self._monitor.no_text_signal.connect(lambda: self._log("已过滤无效内容"))
         self._monitor.status_signal.connect(self._update_status)
         self._monitor.timing_signal.connect(self._log)
         self._monitor.start()
@@ -496,27 +488,27 @@ class MainWindow(QMainWindow):
             self._monitor.wait(5000)
             self._monitor = None
 
-    @Slot(str, str)
-    def _on_monitor_result(self, source: str, translated: str) -> None:
-        self._source_text.setPlainText(source)
-        self._translated_text.setPlainText(translated)
-        self._log(f"翻译完成，{len(source)} → {len(translated)} 字符")
+    @Slot(str)
+    def _on_monitor_result(self, translated: str) -> None:
+        t = translated.strip()
+        if not t:
+            return
 
-        # 弹窗在原文区域附近
+        self._translated_text.setPlainText(t)
+        self._log(f"翻译完成，{len(t)} 字")
+
         try:
-            db = self._db
-            db.insert(source, translated, "inbound",
-                     self._cfg.get("source_language", "auto"),
-                     self._cfg.get("target_language", "zh-CN"))
+            self._db.insert("", t, "inbound",
+                          self._cfg.get("source_language", "auto"),
+                          self._cfg.get("target_language", "zh-CN"))
         except Exception:
             pass
 
         while len(self._popups) >= 6:
             old = self._popups.pop(0)
             old.close()
-        pos = QPoint(150, 150)  # 默认位置，全屏模式没有精确坐标
-        popup = TranslationPopup(
-            source[:100], translated[:200], pos)
+        pos = QPoint(200, 150)
+        popup = TranslationPopup(translated_text=t, screen_pos=pos)
         popup.closed.connect(lambda p=popup: self._rm_popup(p))
         self._popups.append(popup)
         self._update_status("全屏监听中")
@@ -557,7 +549,7 @@ class MainWindow(QMainWindow):
             self._translated_text.setPlainText(result)
             if info:
                 pos = QPoint(info.get("x", 150), info.get("y", 150))
-                popup = TranslationPopup(source[:100], result[:200], pos)
+                popup = TranslationPopup(translated_text=result, screen_pos=pos)
                 popup.closed.connect(lambda p=popup: self._rm_popup(p))
                 self._popups.append(popup)
 
