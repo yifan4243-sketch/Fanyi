@@ -22,8 +22,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_language": "zh-CN",
     "reply_language": "tl",
     "ocr_interval_seconds": 1.5,
+    "request_timeout_seconds": 20,
+    "auto_start_fullscreen": True,
+    "max_translate_blocks_per_round": 5,
+    "translation_cache_minutes": 10,
+    "ocr_confidence_threshold": 0.45,
     "ocr_scale_factor": 2.0,
-    "ocr_confidence_threshold": 0.5,
     "max_history_days": 30,
 }
 
