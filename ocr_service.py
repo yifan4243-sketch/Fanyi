@@ -1,5 +1,5 @@
 """
-OCR 服务：全屏截图 + EasyOCR 识别 + 位置信息 + 外语过滤
+OCR 服务 + 外语过滤
 """
 
 import re
@@ -10,42 +10,122 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+# ---- UI 干扰词 ----
+UI_STOP_PATTERNS = [
+    r'^(搜索|设置|清空|翻译|微信|文件|编辑|发送|复制|粘贴|剪切|删除|撤销)$',
+    r'^(开始|停止|暂停|恢复|帮助|关于|退出|关闭|保存|取消|确定|返回)$',
+    r'^(登录|注册|首页|消息|通讯录|发现|朋友圈|视频号|小程序)$',
+    r'^(扫一扫|看一看|搜一搜|直播|订阅号|服务号)$',
+    r'^(当前状态|当前模式|回复语言|客户原文|中文翻译|运行日志)$',
+    r'^(框选区域|全屏翻译|备用|弹窗|日志|回复|输入|输出|状态信息)$',
+    r'^(File|Edit|View|Help|Settings|Options|Tools|Window)$',
+    r'^(Close|Save|Cancel|OK|Back|Next|Send|Copy|Paste)$',
+    r'^(Cut|Delete|Undo|Redo|Minimize|Maximize|Restore)$',
+]
+_stop_re = re.compile('|'.join(UI_STOP_PATTERNS))
 
-# ---- 过滤关键词 ----
-
-UI_STOP_WORDS = {
-    "文件", "编辑", "设置", "清空", "开始", "停止", "微信", "搜索",
-    "发送", "复制", "翻译", "当前状态", "框选区域", "暂停", "恢复",
-    "帮助", "关于", "退出", "关闭", "保存", "取消", "确定", "返回",
-    "登录", "注册", "首页", "消息", "通讯录", "发现", "我", "朋友圈",
-    "视频号", "小程序", "扫一扫", "看一看", "搜一搜", "直播",
-    "File", "Edit", "View", "Help", "Settings", "Options", "Tools",
-    "Window", "Close", "Save", "Cancel", "OK", "Back", "Next",
-    "Send", "Copy", "Paste", "Cut", "Delete", "Undo", "Redo",
-}
-
-FILIPINO_SIGNAL_WORDS = {
+FILIPINO_WORDS = {
     "ako", "ikaw", "kita", "mahal", "kumusta", "magkano", "po", "opo",
     "hindi", "salamat", "kailangan", "gusto", "ilan", "presyo", "order",
     "padala", "bayad", "produkto", "kulay", "laki", "maliit", "malaki",
-    "piraso", "ito", "yan", "mo", "na", "pa", "ba", "ng", "sa", "ang",
-    "si", "ni", "may", "wala", "meron", "sige", "oo", "dito", "doon",
+    "piraso", "kulambo", "lamok", "ito", "yan", "mo", "na", "pa", "ba",
+    "ng", "sa", "ang", "si", "ni", "may", "wala", "meron", "sige", "oo",
 }
 
-ENGLISH_SIGNAL_WORDS = {
+ENGLISH_WORDS = {
     "price", "order", "quantity", "shipping", "payment", "product",
     "color", "size", "sample", "delivery", "quotation", "invoice",
     "address", "available", "please", "thank", "hello", "dear",
     "factory", "supplier", "manufacturer", "quality", "material",
     "package", "container", "ship", "freight", "cost", "total",
-    "discount", "wholesale", "retail", "stock", "lead", "time",
+    "discount", "wholesale", "retail", "stock", "lead",
 }
 
 
-class OcrBlock:
-    """OCR 识别结果块"""
-    __slots__ = ("text", "bbox", "confidence", "text_hash")
+def normalize_text(text: str) -> str:
+    t = text.strip().lower()
+    t = re.sub(r'\s+', ' ', t)
+    t = re.sub(r'[^\w\s]', '', t)
+    return t.strip()
 
+
+def _chinese_ratio(text: str) -> float:
+    cleaned = re.sub(r'\s', '', text)
+    if not cleaned:
+        return 0.0
+    cn = len(re.findall(r'[一-鿿]', cleaned))
+    return cn / len(cleaned)
+
+
+def _is_mostly_number(text: str) -> bool:
+    c = re.sub(r'[\s,.\-+%$¥€£]', '', text)
+    if not c:
+        return False
+    return sum(1 for x in c if x.isdigit()) / len(c) > 0.6
+
+
+def _is_mostly_symbol(text: str) -> bool:
+    c = re.sub(r'\s', '', text)
+    if not c:
+        return True
+    return sum(1 for x in c if x.isalpha()) / len(c) < 0.3
+
+
+def _has_latin(text: str) -> bool:
+    return bool(re.search(r'[a-zA-Z]{2,}', text))
+
+
+def _is_url_or_email(text: str) -> bool:
+    return bool(re.search(r'https?://|www\.|\.com|\.cn|\.net|\.org|@\w+\.\w+', text, re.I))
+
+
+def _is_time_or_date(text: str) -> bool:
+    t = text.strip()
+    if re.search(r'^\d{1,2}:\d{2}', t):
+        return True
+    if re.search(r'^(昨天|今天|明天|上午|下午|凌晨|早上|中午|晚上)', t):
+        return True
+    if re.search(r'^\d{4}年\d{1,2}月\d{1,2}日', t):
+        return True
+    return False
+
+
+def is_likely_foreign_text(text: str) -> bool:
+    t = text.strip()
+    if len(t) < 5:
+        return False
+    if _is_mostly_number(t):
+        return False
+    if _is_mostly_symbol(t):
+        return False
+    if _chinese_ratio(t) > 0.3:
+        return False
+    if _is_url_or_email(t):
+        return False
+    if _is_time_or_date(t):
+        return False
+    if _stop_re.match(t):
+        return False
+    if not _has_latin(t):
+        return False
+    if len(t) <= 6 and t.isupper():
+        return False
+
+    words = set(t.lower().split())
+    if words & FILIPINO_WORDS:
+        return True
+    if words & ENGLISH_WORDS:
+        return True
+
+    alpha = sum(1 for c in t if c.isalpha())
+    total = len(re.sub(r'\s', '', t))
+    if total > 0 and alpha / total > 0.5 and 5 <= len(t) <= 300:
+        return True
+    return False
+
+
+class OcrBlock:
+    __slots__ = ("text", "bbox", "confidence", "text_hash")
     def __init__(self, text: str, bbox: list, confidence: float) -> None:
         self.text = text
         self.bbox = bbox
@@ -56,111 +136,35 @@ class OcrBlock:
     def top_left(self) -> tuple[int, int]:
         return (int(self.bbox[0][0]), int(self.bbox[0][1]))
 
-
-def normalize_text(text: str) -> str:
-    """规范化文本用于去重比较"""
-    t = text.strip().lower()
-    t = re.sub(r'\s+', ' ', t)
-    t = re.sub(r'[^\w\s]', '', t)
-    t = t.strip()
-    return t
+    @property
+    def center_y(self) -> float:
+        ys = [p[1] for p in self.bbox]
+        return sum(ys) / len(ys)
 
 
-def contains_chinese(text: str) -> bool:
-    """检查是否包含中文字符"""
-    return bool(re.search(r'[一-鿿]', text))
-
-
-def chinese_ratio(text: str) -> float:
-    """中文字符占比"""
-    if not text:
-        return 0.0
-    cleaned = re.sub(r'\s', '', text)
-    if not cleaned:
-        return 0.0
-    chinese_chars = len(re.findall(r'[一-鿿]', cleaned))
-    return chinese_chars / len(cleaned)
-
-
-def is_mostly_number(text: str) -> bool:
-    cleaned = re.sub(r'[\s,.\-+%$¥€£]', '', text)
-    if not cleaned:
-        return False
-    digits = sum(1 for c in cleaned if c.isdigit())
-    return digits / len(cleaned) > 0.6
-
-
-def is_mostly_symbol(text: str) -> bool:
-    cleaned = re.sub(r'\s', '', text)
-    if not cleaned:
-        return True
-    letters = sum(1 for c in cleaned if c.isalpha())
-    return letters / len(cleaned) < 0.3
-
-
-def has_latin(text: str) -> bool:
-    return bool(re.search(r'[a-zA-Z]{2,}', text))
-
-
-def is_url_or_email(text: str) -> bool:
-    return bool(re.search(
-        r'https?://|www\.|\.com|\.cn|\.net|\.org|@\w+\.\w+', text, re.IGNORECASE))
-
-
-def is_date_or_time(text: str) -> bool:
-    return bool(re.search(
-        r'^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}$|^\d{1,2}:\d{2}', text.strip()))
-
-
-def is_likely_foreign_text(text: str) -> bool:
-    """判断文本是否为需要翻译的外语文本"""
-    t = text.strip()
-    if len(t) < 3:
-        return False
-    if is_mostly_number(t):
-        return False
-    if is_mostly_symbol(t):
-        return False
-    if is_url_or_email(t):
-        return False
-    if is_date_or_time(t):
-        return False
-
-    # 中文占比过高不翻译
-    if chinese_ratio(t) > 0.3:
-        return False
-
-    # UI 常见词不翻译
-    if t in UI_STOP_WORDS:
-        return False
-
-    # 必须有拉丁字母
-    if not has_latin(t):
-        return False
-
-    # 纯大写短文本通常是 UI 标签
-    if len(t) <= 5 and t.isupper():
-        return False
-
-    # 包含菲律宾语或英语信号词
-    words = set(t.lower().split())
-    if words & FILIPINO_SIGNAL_WORDS:
-        return True
-    if words & ENGLISH_SIGNAL_WORDS:
-        return True
-
-    # 拉丁字母占比较高且不长不短
-    alpha_count = sum(1 for c in t if c.isalpha())
-    total = len(re.sub(r'\s', '', t))
-    if total > 0 and alpha_count / total > 0.5 and 3 <= len(t) <= 200:
-        return True
-
-    return False
+def merge_blocks(blocks: list[OcrBlock], y_gap: int = 30) -> list[OcrBlock]:
+    """把同一气泡的多行文本块合并为一个"""
+    if not blocks:
+        return []
+    merged: list[OcrBlock] = []
+    current = blocks[0]
+    for b in blocks[1:]:
+        if abs(b.center_y - current.center_y) < y_gap:
+            current.text += " " + b.text
+            x0 = min(current.bbox[0][0], b.bbox[0][0])
+            y0 = min(current.bbox[0][1], b.bbox[0][1])
+            x1 = max(current.bbox[2][0], b.bbox[2][0])
+            y1 = max(current.bbox[2][1], b.bbox[2][1])
+            current.bbox = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            current.confidence = max(current.confidence, b.confidence)
+        else:
+            merged.append(current)
+            current = b
+    merged.append(current)
+    return merged
 
 
 class OcrService:
-    """OCR 引擎封装，后台线程安全"""
-
     def __init__(self, config: Any) -> None:
         self._config = config
         self._reader: Any = None
@@ -188,17 +192,16 @@ class OcrService:
         return self._init_error
 
     def recognize_blocks(self, image: Image.Image) -> list[OcrBlock]:
-        """OCR 识别，返回带位置信息的文本块列表（已过滤）"""
         if not self._ready or self._reader is None:
-            raise RuntimeError("OCR 引擎未初始化")
+            raise RuntimeError("OCR 未初始化")
 
         with self._lock:
             processed = self._preprocess(image)
-            img_array = np.array(processed)
-            results = self._reader.readtext(img_array, detail=1)
+            arr = np.array(processed)
+            results = self._reader.readtext(arr, detail=1)
 
             threshold = float(self._config.get("ocr_confidence_threshold", 0.45))
-            factor = float(self._config.get("ocr_scale_factor", 2.0))
+            factor = float(self._config.get("ocr_scale_factor", 1.0))
 
             blocks: list[OcrBlock] = []
             for item in results:
@@ -206,31 +209,25 @@ class OcrService:
                     continue
                 bbox, text, conf = item
                 text = text.strip()
-                if not text:
-                    continue
-                if conf < threshold:
+                if not text or conf < threshold:
                     continue
                 if not is_likely_foreign_text(text):
                     continue
-
                 if factor != 1.0:
                     bbox = [[p[0] / factor, p[1] / factor] for p in bbox]
+                b = OcrBlock(text, bbox, conf)
+                b.text_hash = normalize_text(text)
+                blocks.append(b)
 
-                block = OcrBlock(text, bbox, conf)
-                block.text_hash = normalize_text(text)
-                blocks.append(block)
-
-            blocks.sort(key=lambda b: b.top_left[1])
-            return blocks
+            blocks.sort(key=lambda b: b.center_y)
+            return merge_blocks(blocks)
 
     def recognize_plain(self, image: Image.Image) -> str:
-        blocks = self.recognize_blocks(image)
-        return "\n".join(b.text for b in blocks)
+        return "\n".join(b.text for b in self.recognize_blocks(image))
 
     def _preprocess(self, image: Image.Image) -> Image.Image:
-        factor = float(self._config.get("ocr_scale_factor", 2.0))
+        factor = float(self._config.get("ocr_scale_factor", 1.0))
         if factor != 1.0:
             w, h = image.size
-            image = image.resize(
-                (int(w * factor), int(h * factor)), Image.LANCZOS)
+            image = image.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
         return image.convert("L").convert("RGB")

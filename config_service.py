@@ -21,13 +21,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "source_language": "auto",
     "target_language": "zh-CN",
     "reply_language": "tl",
-    "ocr_interval_seconds": 1.5,
+    "ocr_interval_seconds": 2.5,
     "request_timeout_seconds": 20,
     "auto_start_fullscreen": True,
-    "max_translate_blocks_per_round": 5,
+    "max_translate_blocks_per_round": 3,
     "translation_cache_minutes": 10,
     "ocr_confidence_threshold": 0.45,
-    "ocr_scale_factor": 2.0,
+    "ocr_scale_factor": 1.0,
     "max_history_days": 30,
 }
 
