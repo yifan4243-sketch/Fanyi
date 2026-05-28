@@ -1,0 +1,8 @@
+pyside6>=6.5.0
+mss>=9.0.0
+easyocr>=1.7.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+requests>=2.31.0
+pyperclip>=1.8.0
+Pillow>=10.0.0

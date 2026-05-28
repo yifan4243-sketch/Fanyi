@@ -1,0 +1,13 @@
+{
+    "provider": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "sk-your-api-key-here",
+    "model": "deepseek-chat",
+    "source_language": "auto",
+    "target_language": "zh-CN",
+    "reply_language": "tl",
+    "ocr_interval_seconds": 1.5,
+    "ocr_scale_factor": 2.0,
+    "ocr_confidence_threshold": 0.5,
+    "max_history_days": 30
+}
