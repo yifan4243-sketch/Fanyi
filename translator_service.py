@@ -2,14 +2,9 @@
 翻译服务：OpenAI-compatible API 调用
 """
 
-import time
-import re
 from typing import Any
-
 import requests
 
-
-# ====== 提示词模板 ======
 
 INBOUND_SYSTEM_PROMPT = """你是外贸客服翻译助手。
 请将下面客户消息翻译成简体中文，并提取客户意图。
@@ -49,11 +44,11 @@ class TranslatorService:
         self._config = config
 
     def translate_inbound(self, text: str) -> str:
-        """客户消息 → 中文翻译"""
+        """客户消息 -> 中文翻译"""
         return self._call_api(INBOUND_SYSTEM_PROMPT, text)
 
     def translate_outbound(self, chinese_text: str) -> str:
-        """中文回复 → 目标语言"""
+        """中文回复 -> 目标语言"""
         reply_lang = self._config.get("reply_language", "tl")
         system = OUTBOUND_SYSTEM_PROMPT_TEMPLATE.format(reply_language=reply_lang)
         return self._call_api(system, chinese_text)
@@ -62,12 +57,14 @@ class TranslatorService:
         """调用 OpenAI-compatible Chat Completions API"""
         base_url = self._config.get("base_url", "https://api.deepseek.com")
         api_key = self._config.get("api_key", "")
-        model = self._config.get("model", "deepseek-chat")
+        model = self._config.get("model", "deepseek-v4-flash")
+        completions_path = self._config.get(
+            "chat_completions_path", "/chat/completions")
 
         if not api_key:
-            raise ValueError("API Key 未配置")
+            raise ValueError("API Key 未配置，请在设置中填写 API Key")
 
-        url = base_url.rstrip("/") + "/v1/chat/completions"
+        url = base_url.rstrip("/") + completions_path
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -84,8 +81,7 @@ class TranslatorService:
             "max_tokens": 2048,
         }
 
-        timeout = 30
-        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
 
         data = response.json()

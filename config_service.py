@@ -1,19 +1,23 @@
 """
 配置服务：读取/写入 config.json
+首次启动时如果没有 config.json，自动从 config.example.json 复制
 """
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 CONFIG_DIR = Path(__file__).parent
 CONFIG_PATH = CONFIG_DIR / "config.json"
+EXAMPLE_PATH = CONFIG_DIR / "config.example.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "deepseek",
     "base_url": "https://api.deepseek.com",
-    "api_key": "sk-ef6f1c4cacdd4571985e285bbf4db976",
+    "api_key": "",
     "model": "deepseek-v4-flash",
+    "chat_completions_path": "/chat/completions",
     "source_language": "auto",
     "target_language": "zh-CN",
     "reply_language": "tl",
@@ -31,17 +35,26 @@ class ConfigService:
         self._data: dict[str, Any] = {}
 
     def load(self) -> dict[str, Any]:
-        if CONFIG_PATH.exists():
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    self._data = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self._data = {}
-        else:
+        """加载配置。如果没有 config.json，首次从 example 复制一份"""
+        if not CONFIG_PATH.exists():
+            if EXAMPLE_PATH.exists():
+                shutil.copy(EXAMPLE_PATH, CONFIG_PATH)
+            else:
+                self._data = dict(DEFAULT_CONFIG)
+                self.save()
+                return self._data
+
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                self._data = json.load(f)
+        except (json.JSONDecodeError, OSError):
             self._data = {}
+
+        # 用默认值补全缺失字段
         for key, value in DEFAULT_CONFIG.items():
             if key not in self._data:
                 self._data[key] = value
+
         return self._data
 
     def save(self) -> None:
@@ -64,9 +77,13 @@ class ConfigService:
 
     @property
     def model(self) -> str:
-        return str(self.get("model", "deepseek-chat"))
+        return str(self.get("model", "deepseek-v4-flash"))
+
+    @property
+    def chat_completions_path(self) -> str:
+        return str(self.get("chat_completions_path", "/chat/completions"))
 
     @property
     def is_configured(self) -> bool:
         key = self.api_key
-        return bool(key) and key != "sk-your-api-key-here" and len(key) > 10
+        return bool(key) and len(key) > 10 and not key.startswith("sk-your-")

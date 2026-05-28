@@ -2,8 +2,9 @@ venv/
 __pycache__/
 *.pyc
 config.json
-*.db
+translation_history.db
+translation_history.db-shm
+translation_history.db-wal
 dist/
 build/
 *.spec
-translation_history.db*
