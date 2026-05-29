@@ -25,6 +25,7 @@ from ocr_service import OcrService, OcrBlock, normalize_text, merge_blocks
 from translator_service import TranslatorService
 from floating_window import TranslationPopup
 from screen_selector import ScreenSelector
+from window_finder import get_primary_chat_window
 
 
 # ====== 设置对话框 ======
@@ -210,8 +211,22 @@ class FullScreenMonitor(QThread):
 
     def _capture(self) -> Image.Image:
         with mss.mss() as sct:
-            shot = sct.grab(sct.monitors[1])
+            win = self._find_window()
+            if win:
+                monitor = {
+                    "left": win["left"], "top": win["top"],
+                    "width": win["width"], "height": win["height"],
+                }
+            else:
+                monitor = sct.monitors[1]
+            shot = sct.grab(monitor)
             return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    def _find_window(self):
+        win = get_primary_chat_window()
+        if win and win["width"] > 200 and win["height"] > 200:
+            return win
+        return None
 
 
 # ====== 主窗口 ======
@@ -254,8 +269,11 @@ class MainWindow(QMainWindow):
                 self._log("[提示] API Key 未配置，请点「设置」填入后点「恢复」")
                 self._update_status("等待 API Key")
                 return
+            win = get_primary_chat_window()
+            target = win["title"] if win else "全屏"
+            self._mode_label.setText(f"目标窗口: {target}")
             self._start_monitor()
-            self._log("程序已启动，正在全屏监听屏幕外语文字")
+            self._log(f"程序已启动，目标窗口: {target}")
 
     # ====== UI ======
 
@@ -408,7 +426,12 @@ class MainWindow(QMainWindow):
         self._update_status("OCR识别中")
         try:
             with mss.mss() as sct:
-                shot = sct.grab(sct.monitors[1])
+                win = get_primary_chat_window()
+                if win and win["width"] > 200:
+                    monitor = {"left": win["left"], "top": win["top"], "width": win["width"], "height": win["height"]}
+                else:
+                    monitor = sct.monitors[1]
+                shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
             blocks = self._ocr.recognize_blocks(img)
             if not blocks:
